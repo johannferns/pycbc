@@ -84,6 +84,8 @@ parser.add_argument('--min-ifar', type=float, metavar='YEARS',
 parser.add_argument('--production-server', action="store_true", default=False,
                     help="Upload event to production graceDB. If not given "
                          "events will be uploaded to playground server.")
+parser.add_argument('--bootstrap-servers', default='kafka-dev.ligo.org:9092',
+        help="The bootstrap server passed into the GraceDB Kafka producer class")
 parser.add_argument('--force-overwrite', action='store_true', default=False,
                     help="GraceDb instance will be checked for if an event "
                          "with the same event time and FAR already exist. "
@@ -122,7 +124,7 @@ else:
 logging.info("Creating Kafka producer...")
 ca_bundle = certifi.where()
 producer = GraceDbKafkaProducer(
-    bootstrap_servers='kafka-dev.ligo.org:9092',
+    bootstrap_servers=args.bootstrap_servers,
     service_url=gracedb._service_url,
     ca_cert_path=ca_bundle,
 )
@@ -248,6 +250,7 @@ for event in coinc_table:
             search=id_str,
             offline=True,
             kafka=producer,
+            http_fallback=True,
         ).json()
 
         logging.info("Uploaded event %s.", r["graceid"])
