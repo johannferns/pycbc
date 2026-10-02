@@ -1596,11 +1596,15 @@ class LiveBatchMatchedFilter(object):
         mem_ids = [(a, b) for a, b in zip(chunk_durations, self.chunks)]
         mem_types = set(zip(mem_ids, samples))
 
+        maxsize = int(max(size for _, size in mem_types))
+        self._out_pool = zeros(maxsize, dtype=numpy.complex64)
+        self._cout_pool = zeros(maxsize, dtype=numpy.complex64)        
+        
         self.tgroups, self.mids = [], []
         for i, size in mem_types:
             dur, count = i
-            self.out_mem[i] = zeros(size, dtype=numpy.complex64)
-            self.cout_mem[i] = zeros(size, dtype=numpy.complex64)
+            self.out_mem[i] = self._out_pool[0:int(size)]
+            self.cout_mem[i] = self._cout_pool[0:int(size)]            
             self.ifts[i] = IFFT(self.cout_mem[i], self.out_mem[i],
                                 nbatch=count,
                                 size=len(self.cout_mem[i]) // count)
@@ -1718,6 +1722,15 @@ class LiveBatchMatchedFilter(object):
 
         seg = slice(valid_start, valid_end)
 
+        # The workspace is shared between groups (and reused by the vetoes),
+        # so the negative-frequency part of each template's slot may hold
+        # data from elsewhere. The batch correlation only writes the first
+        # len(template) samples of each slot, and the complex IFFT needs the
+        # remainder to be zero, so clear it before correlating.
+        flen = len(tgroup[0])
+        cmem = self.cout_mem[mid].data.reshape(len(tgroup), psize)
+        cmem[:, flen:] = 0        
+        
         self.corr[self.block_id].execute(stilde)
         self.ifts[mid].execute()
 
