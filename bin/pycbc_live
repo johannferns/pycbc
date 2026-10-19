@@ -20,6 +20,7 @@ import os.path
 import platform
 import subprocess
 import sys
+import time
 from multiprocessing.dummy import threading
 
 import certifi
@@ -1425,6 +1426,17 @@ with ctx:
         bank.table.sort(order="mchirp")
         waveforms = list(bank[evnt.rank - 1 :: evnt.size - 1])
         check_max_length(args, waveforms)
+        _wf_durations = numpy.array([1.0 / wf.delta_f for wf in waveforms])
+        logging.info(
+            "BANKLOAD host=%s rank=%d n_templates=%d total_duration=%.3f "
+            "max_duration=%.3f mean_duration=%.3f",
+            platform.node(),
+            evnt.rank,
+            len(_wf_durations),
+            float(_wf_durations.sum()) if len(_wf_durations) else 0.0,
+            float(_wf_durations.max()) if len(_wf_durations) else 0.0,
+            float(_wf_durations.mean()) if len(_wf_durations) else 0.0,
+        )
         mf = LiveBatchMatchedFilter(
             waveforms,
             args.snr_threshold,
@@ -1533,14 +1545,19 @@ with ctx:
 
         results = {}
         evnt.live_detectors = set()
+        t_advance = t_psd = t_filter = 0.0
 
         for ifo in evnt.ifos if evnt.rank == 0 else evnt.trigg_ifos:
             results[ifo] = False
+            _t0 = time.perf_counter()
             status = data_reader[ifo].advance(
                 valid_pad, timeout=args.frame_read_timeout
             )
+            t_advance += time.perf_counter() - _t0
             if status and psd_count[ifo] == 0:
+                _t0 = time.perf_counter()
                 status = data_reader[ifo].recalculate_psd()
+                t_psd += time.perf_counter() - _t0
                 # If the psd has been recalculated then we need a new
                 #  filter for psd variation calculation
                 psd_recalculated[ifo] = True
@@ -1559,12 +1576,33 @@ with ctx:
                     evnt.live_detectors.add(ifo)
                     if evnt.rank > 0:
                         logging.info("Filtering %s", ifo)
+                        _t0 = time.perf_counter()
                         results[ifo] = mf.process_data(data_reader[ifo])
+                        t_filter += time.perf_counter() - _t0
             else:
                 logging.info("Insufficient data for %s analysis", ifo)
 
         if evnt.rank > 0:
+            _gather_enter_wall = time.time()
+            logging.info(
+                "GATHER_ENTER end=%s wall=%.6f",
+                int(data_end()),
+                _gather_enter_wall,
+            )
+            _t0 = time.perf_counter()
             evnt.commit_results((results, data_end()))
+            t_gather = time.perf_counter() - _t0
+            logging.info(
+                "RANKTIMING end=%s advance=%.3f psd=%.3f filter=%.3f "
+                "gather=%.3f busy=%.3f wall_enter=%.6f",
+                int(data_end()),
+                t_advance,
+                t_psd,
+                t_filter,
+                t_gather,
+                t_advance + t_psd + t_filter,
+                _gather_enter_wall,
+            )
         else:
             psds = {
                 ifo: data_reader[ifo].psd
@@ -1574,7 +1612,20 @@ with ctx:
 
             # Collect together the single detector triggers
             if evnt.size > 1:
+                _gather_enter_wall = time.time()
+                logging.info(
+                    "GATHER_ENTER end=%s wall=%.6f",
+                    int(data_end()),
+                    _gather_enter_wall,
+                )
+                _t0 = time.perf_counter()
                 results, valid_end = evnt.gather_results()
+                t_gather = time.perf_counter() - _t0
+            else:
+                _gather_enter_wall = 0.0
+                t_gather = 0.0
+
+            _t_root_post_start = time.perf_counter()
 
             # veto detectors with different state between the root
             # and worker nodes (e.g. late frame files on one node only)
@@ -1723,9 +1774,26 @@ with ctx:
                     bgf.attrs["gps_time"] = last_bg_dump_time
 
             logging.info("Finished analyzing up to %s", data_end())
+            logging.info(
+                "RANKTIMING end=%s advance=%.3f psd=%.3f filter=0.000 "
+                "gather=%.3f root_post=%.3f busy=%.3f wall_enter=%.6f",
+                int(data_end()),
+                t_advance,
+                t_psd,
+                t_gather,
+                time.perf_counter() - _t_root_post_start,
+                t_advance + t_psd,
+                _gather_enter_wall,
+            )
 
         if args.sync:
+            _t0 = time.perf_counter()
             evnt.barrier()
+            logging.info(
+                "BARRIER_WAIT end=%s wait=%.3f",
+                int(data_end()),
+                time.perf_counter() - _t0,
+            )
         tdiff = pycbc.gps_now() - t1
         lag = float(pycbc.gps_now() - data_end())
         logging.info(
